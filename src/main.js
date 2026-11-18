@@ -57,7 +57,7 @@ async function start() {
   let scene = demo.scene;
   let sculpture = demo.sculpture;
   let lastTime = performance.now(), count = 0, accumulator = 0;
-  setStatus('GPU готов · GGX IBL + HDR sky + bloom + тени · Перетащите .glb для импорта');
+  setStatus('GPU готов · HDRI/IBL + 3 каскада теней + bloom · Перетащите .glb или .hdr');
 
   renderer.device.lost.then(info => {
     setStatus('GPU-устройство потеряно: ' + info.message + ' · Перезагрузите страницу');
@@ -96,6 +96,31 @@ async function start() {
       setStatus('Ошибка модели: ' + error.message);
     }
   };
+  const hdriPicker = document.querySelector('#hdri');
+  const loadHDRI = async file => {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.hdr')) {
+      setStatus('Поддерживаются Radiance RGBE-файлы формата .hdr');
+      return;
+    }
+    setStatus('Загрузка HDRI ' + file.name + '…');
+    try {
+      const { width, height } = await renderer.environment.loadHDRI(file);
+      setStatus('HDRI: ' + file.name + ' (' + width + '×' + height + ') · GGX IBL готов');
+    } catch (error) {
+      console.error(error);
+      setStatus('Ошибка HDRI: ' + error.message);
+    }
+  };
+  hdriPicker.addEventListener('change', () => {
+    void loadHDRI(hdriPicker.files?.[0]);
+    hdriPicker.value = '';
+  });
+  document.querySelector('#reset-hdri').addEventListener('click', () => {
+    renderer.environment.useProcedural(scene.sunDirection);
+    setStatus('Процедурное HDR-небо восстановлено');
+  });
+
   const picker = document.querySelector('#model');
   picker.addEventListener('change', () => {
     void loadModel(picker.files?.[0]);
@@ -104,7 +129,12 @@ async function start() {
   window.addEventListener('dragover', e => e.preventDefault());
   window.addEventListener('drop', e => {
     e.preventDefault();
-    void loadModel(e.dataTransfer?.files?.[0]);
+    const file = e.dataTransfer?.files?.[0];
+    if (file?.name.toLowerCase().endsWith('.hdr')) {
+      void loadHDRI(file);
+    } else {
+      void loadModel(file);
+    }
   });
   exposure.addEventListener('input', () => {
     exposureValue.textContent = Number(exposure.value).toFixed(2);
@@ -120,7 +150,9 @@ async function start() {
   // Rebuilding irradiance/specular maps is expensive: update on slider release.
   sun.addEventListener('change', () => {
     scene.sunDirection = sunDirectionAtElevation(Number(sun.value));
-    setStatus('HDR-окружение обновлено · высота солнца ' + sun.value + '°');
+    setStatus(renderer.environment.mode === 'hdri'
+      ? 'Направление солнца обновлено для теней · HDRI сохранено'
+      : 'Процедурное небо и IBL обновлены · солнце ' + sun.value + '°');
   });
 
   function frame(time) {

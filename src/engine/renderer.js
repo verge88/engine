@@ -1,4 +1,6 @@
-import { lookAt, multiply, normalize, orthographic } from './math.js';
+import { normalize } from './math.js';
+import { buildCascades, CASCADE_COUNT, CASCADE_SHADOW_SIZE } from './cascades.js';
+import { cameraBasis } from './lighting.js';
 import { makePostUniform } from './lighting.js';
 import { Environment } from './environment.js';
 import { Scene } from './scene.js';
@@ -42,12 +44,13 @@ export class Renderer {
     this.device = device;
     this.context = context;
     this.format = format;
-    this.shadowSize = 2048;
+    this.shadowSize = CASCADE_SHADOW_SIZE;
+    this.shadowCount = CASCADE_COUNT;
     this.hdr = null;
     this.depth = null;
     this.bloomA = null;
     this.bloomB = null;
-    this.frameUniform = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.frameUniform = device.createBuffer({ size: 352, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.exposureUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.surfaceSampler = device.createSampler({
       magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear',
@@ -57,7 +60,7 @@ export class Renderer {
     this.shadowSampler = device.createSampler({ compare: 'less-equal', magFilter: 'linear', minFilter: 'linear' });
     this.shadow = device.createTexture({
       label: 'Directional sunlight shadow map',
-      size: [this.shadowSize, this.shadowSize],
+      size: [this.shadowSize, this.shadowSize, this.shadowCount],
       format: 'depth32float',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
     });
@@ -76,12 +79,18 @@ export class Renderer {
     this.shadowObjectLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }
     ] });
-    this.shadowFrameGroup = device.createBindGroup({ layout: this.shadowFrameLayout, entries: [
-      { binding: 0, resource: { buffer: this.frameUniform } }
-    ] });
+    this.shadowFrameBuffers = Array.from({ length: this.shadowCount }, () =>
+      device.createBuffer({
+        size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      }));
+    this.shadowFrameGroups = this.shadowFrameBuffers.map(buffer => device.createBindGroup({
+      layout: this.shadowFrameLayout,
+      entries: [{ binding: 0, resource: { buffer } }]
+    }));
     this.frameLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'depth', viewDimension: '2d-array' } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
       { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
@@ -97,7 +106,7 @@ export class Renderer {
     ] });
     this.frameGroup = device.createBindGroup({ layout: this.frameLayout, entries: [
       { binding: 0, resource: { buffer: this.frameUniform } },
-      { binding: 1, resource: this.shadow.createView() },
+      { binding: 1, resource: this.shadow.createView({ dimension: '2d-array' }) },
       { binding: 2, resource: this.shadowSampler },
       { binding: 3, resource: this.environment.irradiance.createView({ dimension: 'cube' }) },
       { binding: 4, resource: this.environment.specular.createView({ dimension: 'cube' }) },
@@ -109,7 +118,9 @@ export class Renderer {
     const shadowLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.shadowFrameLayout, this.shadowObjectLayout]
     });
-    const pbr = await checkedShader(device, 'pbr.wgsl');
+    const [pbr, shadowShader] = await Promise.all([
+      checkedShader(device, 'pbr.wgsl'), checkedShader(device, 'shadow.wgsl')
+    ]);
     const vertexBuffers = [{
       arrayStride: 32,
       attributes: [
@@ -120,7 +131,7 @@ export class Renderer {
     }];
     this.shadowPipeline = await device.createRenderPipelineAsync({
       label: 'Shadow depth pass', layout: shadowLayout,
-      vertex: { module: pbr, entryPoint: 'vsShadow', buffers: vertexBuffers },
+      vertex: { module: shadowShader, entryPoint: 'vsShadow', buffers: vertexBuffers },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: {
         format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less',
@@ -275,19 +286,25 @@ export class Renderer {
     const { position, viewProjection } = camera.frame(this.canvas.width / this.canvas.height);
     const sun = normalize(scene.sunDirection);
     this.environment.regenerate(sun);
-    const center = camera.target;
-    const lightEye = center.map((p, i) => p + 30 * sun[i]);
-    const lightProjection = multiply(
-      orthographic(-24, 24, -24, 24, 0.1, 75),
-      lookAt(lightEye, center)
-    );
-    const frame = new Float32Array(48);
-    frame.set(viewProjection);
-    frame.set(lightProjection, 16);
-    frame.set([...position, 1], 32);
-    frame.set([...sun, 0], 36);
-    frame.set([...scene.sunColor, scene.sunIntensity], 40);
-    frame.set([0, 0, 0, scene.exposure], 44);
+    const cascades = buildCascades({
+      eye: position, target: camera.target,
+      aspect: this.canvas.width / this.canvas.height,
+      sunDirection: sun, shadowSize: this.shadowSize
+    });
+    const { forward } = cameraBasis(position, camera.target);
+    // WGSL Frame uniform: 1 MVP + 3 cascade VP matrices + 6 vec4 = 352 bytes.
+    const frame = new Float32Array(88);
+    frame.set(viewProjection, 0);
+    for (let i = 0; i < this.shadowCount; i++) {
+      frame.set(cascades.matrices[i], 16 + i * 16);
+      device.queue.writeBuffer(this.shadowFrameBuffers[i], 0, cascades.matrices[i]);
+    }
+    frame.set([...position, 1], 64);
+    frame.set([...forward, 0], 68);
+    frame.set([...sun, 0], 72);
+    frame.set([...scene.sunColor, scene.sunIntensity], 76);
+    frame.set([0, 0, 0, scene.exposure], 80);
+    frame.set([...cascades.splits, 0], 84);
     device.queue.writeBuffer(this.frameUniform, 0, frame);
     device.queue.writeBuffer(this.exposureUniform, 0,
       makePostUniform(scene, position, camera.target, this.canvas.width / this.canvas.height));
@@ -309,17 +326,22 @@ export class Renderer {
     }
 
     const encoder = device.createCommandEncoder();
-    const shadowPass = encoder.beginRenderPass({
-      colorAttachments: [],
-      depthStencilAttachment: {
-        view: this.shadow.createView(), depthClearValue: 1,
-        depthLoadOp: 'clear', depthStoreOp: 'store'
-      }
-    });
-    shadowPass.setPipeline(this.shadowPipeline);
-    shadowPass.setBindGroup(0, this.shadowFrameGroup);
-    this.draw(shadowPass, renderables, true);
-    shadowPass.end();
+    for (let i = 0; i < this.shadowCount; i++) {
+      const shadowPass = encoder.beginRenderPass({
+        label: 'Cascaded shadow map ' + (i + 1),
+        colorAttachments: [],
+        depthStencilAttachment: {
+          view: this.shadow.createView({
+            dimension: '2d', baseArrayLayer: i, arrayLayerCount: 1
+          }),
+          depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store'
+        }
+      });
+      shadowPass.setPipeline(this.shadowPipeline);
+      shadowPass.setBindGroup(0, this.shadowFrameGroups[i]);
+      this.draw(shadowPass, renderables, true);
+      shadowPass.end();
+    }
 
     const colorPass = encoder.beginRenderPass({
       colorAttachments: [{
