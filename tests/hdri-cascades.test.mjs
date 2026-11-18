@@ -60,6 +60,7 @@ test('float-to-half upload saturates HDR values and aligns row pitch', () => {
   assert.equal(floatToHalfPositive(1), 0x3c00);
   assert.equal(floatToHalfPositive(2), 0x4000);
   assert.equal(floatToHalfPositive(65504), 0x7bff);
+  assert.equal(floatToHalfPositive(65503.9), 0x7bff);
   assert.equal(floatToHalfPositive(1e10), 0x7bff);
   assert.throws(() => floatToHalfPositive(NaN), RangeError);
   const data = new Float32Array([1, 0.5, 0, 1, 0, 2, 4, 1]);
