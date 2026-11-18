@@ -29,8 +29,7 @@ struct PointLight {
   colorIntensity: vec4<f32>,
 };
 struct PointLights {
-  count: u32,
-  padding: vec3<u32>,
+  header: vec4<u32>,
   items: array<PointLight, 16>,
 };
 @group(0) @binding(7) var<storage, read> lightBuffer: PointLights;
@@ -155,7 +154,7 @@ fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> PBRResult
 
   // Local unshadowed punctual lights, range-gated inverse-square intensity.
   // The fixed storage array avoids rebuilding render pipelines when lights change.
-  for (var i: u32 = 0u; i < min(lightBuffer.count, MAX_POINT_LIGHTS); i += 1u) {
+  for (var i: u32 = 0u; i < min(lightBuffer.header.x, MAX_POINT_LIGHTS); i += 1u) {
     let light = lightBuffer.items[i];
     let toLight = light.positionRange.xyz - input.position;
     let distanceSquared = max(dot(toLight, toLight), 0.01);
