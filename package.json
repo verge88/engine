@@ -1,0 +1,14 @@
+{
+  "name": "verge-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-framework WebGPU 3D renderer with metallic-roughness PBR, GLB import and HDR",
+  "scripts": {
+    "dev": "node scripts/serve.mjs",
+    "start": "node scripts/serve.mjs",
+    "test": "node --test",
+    "check": "node --check src/main.js && node --check src/engine/renderer.js && node --check src/engine/gltf.js && npm test"
+  },
+  "engines": { "node": ">=20" }
+}

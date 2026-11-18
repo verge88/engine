@@ -1,0 +1,24 @@
+:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e8eef9;background:#080d16;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%;width:100%;margin:0;overflow:hidden}
+#viewport{width:100%;height:100%;display:block;touch-action:none}
+.toolbar,.hint,.footer{position:fixed;background:rgba(9,15,26,.75);backdrop-filter:blur(16px);border:1px solid rgba(173,197,238,.13);box-shadow:0 14px 40px rgba(0,0,0,.2)}
+.toolbar{left:16px;right:16px;top:16px;border-radius:18px;padding:12px 17px;display:flex;gap:18px;justify-content:space-between;align-items:center}
+.brand{display:flex;align-items:center;gap:11px;letter-spacing:.16em}
+.brand strong{display:block;font-size:14px}
+.brand small{display:block;letter-spacing:.08em;font-size:10px;color:#95adc8;margin-top:3px}
+.logo{font-size:30px;color:#70d7ed}
+.tools{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+button,.file-button{cursor:pointer;border:1px solid #455879;color:#eaf5ff;background:#1d2c45;padding:10px 13px;font:inherit;font-size:12px;border-radius:10px;transition:background .15s}
+button:hover,.file-button:hover{background:#314a6a}
+.file-button input{display:none}
+.exposure{font-size:12px;color:#becde0;display:flex;align-items:center;gap:10px}
+.exposure input{accent-color:#67ddeb;width:95px}
+.exposure output{font-variant-numeric:tabular-nums;min-width:32px}
+.hint{left:16px;bottom:60px;max-width:390px;border-radius:15px;padding:14px 17px}
+.hint strong{font-size:12px;color:#dceeff}
+.hint p{font-size:12px;line-height:1.6;color:#a9bfd7;margin:6px 0 0}
+.footer{left:16px;right:16px;bottom:12px;padding:10px 15px;border-radius:10px;display:flex;justify-content:space-between;gap:15px;font-size:12px;color:#a6c9da}
+#status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fps{font-variant-numeric:tabular-nums;white-space:nowrap}
+@media(max-width:700px){.toolbar{align-items:flex-start;flex-direction:column}.hint{right:16px;max-width:none}.tools{gap:7px}.exposure input{width:65px}}
