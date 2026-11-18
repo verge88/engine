@@ -31,3 +31,19 @@ export function makePostUniform(scene, eye, target, aspect) {
     ...right, 0, ...up, 0, ...forward, 0
   ]);
 }
+
+
+// Extension of the 64-byte v0.3 uniform, retaining the first four vec4 slots
+// for the existing bloom shader (controls + camera orientation).
+export function makeScreenUniform(scene, eye, target, aspect) {
+  const prefix = makePostUniform(scene, eye, target, aspect);
+  const effects = [
+    clamp(scene.aoStrength ?? 0.85, 0, 2),
+    clamp(scene.giStrength ?? 0.45, 0, 2),
+    clamp(scene.ssrStrength ?? 0.65, 0, 2),
+    clamp(scene.screenRadius ?? 40, 4, 120)
+  ];
+  if (!Array.isArray(eye) || eye.length !== 3 || !eye.every(Number.isFinite))
+    throw new RangeError('Invalid camera position');
+  return new Float32Array([...prefix, ...eye, 1, ...effects]);
+}
