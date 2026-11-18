@@ -23,6 +23,17 @@ struct Object {
 @group(0) @binding(4) var specularEnvironment: texture_cube<f32>;
 @group(0) @binding(5) var integratedBRDF: texture_2d<f32>;
 @group(0) @binding(6) var environmentSampler: sampler;
+const MAX_POINT_LIGHTS: u32 = 16u;
+struct PointLight {
+  positionRange: vec4<f32>,
+  colorIntensity: vec4<f32>,
+};
+struct PointLights {
+  count: u32,
+  padding: vec3<u32>,
+  items: array<PointLight, 16>,
+};
+@group(0) @binding(7) var<storage, read> lightBuffer: PointLights;
 @group(1) @binding(0) var<uniform> object: Object;
 @group(1) @binding(1) var colorTexture: texture_2d<f32>;
 @group(1) @binding(2) var normalTexture: texture_2d<f32>;
@@ -92,8 +103,28 @@ fn visibility(worldPos: vec3<f32>, nDotL: f32) -> f32 {
   }
   return total / 9.0;
 }
+struct PBRResult {
+  @location(0) radiance: vec4<f32>,
+  @location(1) normalDepth: vec4<f32>,
+};
+fn brdfContribution(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>,
+                    base: vec3<f32>, f0: vec3<f32>,
+                    metallic: f32, roughness: f32) -> vec3<f32> {
+  let nDotL = max(dot(N, L), 0.0);
+  if (nDotL <= 0.0) { return vec3<f32>(0.0); }
+  let H = normalize(V + L);
+  let nDotV = max(dot(N, V), 0.0001);
+  let nDotH = saturate(dot(N, H));
+  let hDotV = saturate(dot(H, V));
+  let F = fresnelSchlick(hDotV, f0);
+  let D = distributionGGX(nDotH, roughness);
+  let G = geometrySchlickGGX(nDotV, roughness) * geometrySchlickGGX(nDotL, roughness);
+  let specular = D * G * F / max(4.0 * nDotV * nDotL, 0.0001);
+  let diffuse = (vec3<f32>(1.0) - F) * (1.0 - metallic) * base / PI;
+  return (diffuse + specular) * nDotL;
+}
 @fragment
-fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> @location(0) vec4<f32> {
+fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> PBRResult {
   let base = textureSample(colorTexture, surfaceSampler, input.uv).rgb * object.baseColor.rgb;
   let packed = textureSample(ormTexture, surfaceSampler, input.uv).rgb;
   let metallic = saturate(object.material.x * packed.b);
@@ -115,21 +146,28 @@ fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> @location
     N = normalize(tangent * tangentNormal.x + bitangent * tangentNormal.y + N * tangentNormal.z);
   }
   let V = normalize(frame.cameraPosition.xyz - input.position);
-  let L = normalize(frame.sunDirection.xyz);
-  let H = normalize(V + L);
   let nDotV = max(dot(N, V), 0.0001);
-  let nDotL = max(dot(N, L), 0.0);
-  let nDotH = saturate(dot(N, H));
-  let hDotV = saturate(dot(H, V));
-
   let f0 = mix(vec3<f32>(0.04), base, metallic);
-  let F = fresnelSchlick(hDotV, f0);
-  let D = distributionGGX(nDotH, roughness);
-  let G = geometrySchlickGGX(nDotV, roughness) * geometrySchlickGGX(nDotL, roughness);
-  let specular = D * G * F / max(4.0 * nDotV * nDotL, 0.0001);
-  let diffuse = (vec3<f32>(1.0) - F) * (1.0 - metallic) * base / PI;
-  let direct = (diffuse + specular) * frame.sunColor.rgb * frame.sunColor.a *
-                nDotL * visibility(input.position, nDotL);
+  let sunL = normalize(frame.sunDirection.xyz);
+  var direct = brdfContribution(N, V, sunL, base, f0, metallic, roughness) *
+    frame.sunColor.rgb * frame.sunColor.a *
+    visibility(input.position, saturate(dot(N, sunL)));
+
+  // Local unshadowed punctual lights, range-gated inverse-square intensity.
+  // The fixed storage array avoids rebuilding render pipelines when lights change.
+  for (var i: u32 = 0u; i < min(lightBuffer.count, MAX_POINT_LIGHTS); i += 1u) {
+    let light = lightBuffer.items[i];
+    let toLight = light.positionRange.xyz - input.position;
+    let distanceSquared = max(dot(toLight, toLight), 0.01);
+    let dist = sqrt(distanceSquared);
+    let radius = light.positionRange.w;
+    if (dist >= radius) { continue; }
+    let direction = toLight / dist;
+    let rangeFactor = saturate(1.0 - pow(dist / radius, 4.0));
+    let attenuation = rangeFactor * rangeFactor / distanceSquared;
+    let irradiance = light.colorIntensity.rgb * light.colorIntensity.a * attenuation;
+    direct += brdfContribution(N, V, direction, base, f0, metallic, roughness) * irradiance;
+  }
 
   // Physically-based image-based lighting, generated from a linear-HDR cubemap.
   // Diffuse cube stores integral(L * cosTheta); divide by PI for Lambertian BRDF.
@@ -143,5 +181,9 @@ fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> @location
                                vec2<f32>(nDotV, roughness), 0.0).rg;
   let ambientSpecular = reflected * (f0 * brdf.x + vec3<f32>(brdf.y));
   let radiance = direct + (ambientDiffuse + ambientSpecular) * ao;
-  return vec4<f32>(radiance, 1.0);
+  var result: PBRResult;
+  result.radiance = vec4<f32>(radiance, 1.0);
+  result.normalDepth = vec4<f32>(N * 0.5 + vec3<f32>(0.5),
+    max(dot(input.position - frame.cameraPosition.xyz, frame.cameraForward.xyz), 0.0));
+  return result;
 }
