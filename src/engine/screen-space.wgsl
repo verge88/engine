@@ -65,7 +65,6 @@ fn fsIndirect(input: VSOut) -> @location(0) vec4<f32> {
   let P = positionFromDepth(input.uv, center.a);
   let pixelSize = 1.0 / vec2<f32>(textureDimensions(normalDepth));
   var bleed = vec3<f32>(0.0);
-  var bleedWeight = 0.0;
   var occlusion = 0.0;
 
   for (var i: u32 = 0u; i < 16u; i += 1u) {
@@ -78,18 +77,17 @@ fn fsIndirect(input: VSOut) -> @location(0) vec4<f32> {
     if (neighbor.a <= 0.0) { continue; }
     let Q = positionFromDepth(uv, neighbor.a);
     let d = Q - P;
-    let length = length(d);
-    if (length < 0.05 || length > 5.0) { continue; }
-    let direction = d / length;
+    let distanceToSample = length(d);
+    if (distanceToSample < 0.05 || distanceToSample > 5.0) { continue; }
+    let direction = d / distanceToSample;
     let normalFacing = max(dot(N, direction), 0.0);
     let sourceFacing = max(dot(normalFromGBuffer(neighbor), -direction), 0.0);
-    let falloff = 1.0 / (1.0 + length * length);
+    let falloff = 1.0 / (1.0 + distanceToSample * distanceToSample);
     let weight = normalFacing * sourceFacing * falloff;
     let sourceColor = textureSampleLevel(sceneColor, linearSampler, uv, 0.0).rgb;
     bleed += min(sourceColor, vec3<f32>(10.0)) * weight;
-    bleedWeight += weight;
     if (neighbor.a + 0.12 < center.a && abs(neighbor.a - center.a) < 3.0) {
-      occlusion += (1.0 - smoothstep(0.0, 3.0, length)) * 0.0625;
+      occlusion += (1.0 - smoothstep(0.0, 3.0, distanceToSample)) * 0.0625;
     }
   }
   let indirect = bleed / 16.0;
