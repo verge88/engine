@@ -17,6 +17,10 @@ struct Object {
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadowMap: texture_depth_2d;
 @group(0) @binding(2) var shadowSampler: sampler_comparison;
+@group(0) @binding(3) var diffuseIrradiance: texture_cube<f32>;
+@group(0) @binding(4) var specularEnvironment: texture_cube<f32>;
+@group(0) @binding(5) var integratedBRDF: texture_2d<f32>;
+@group(0) @binding(6) var environmentSampler: sampler;
 @group(1) @binding(0) var<uniform> object: Object;
 @group(1) @binding(1) var colorTexture: texture_2d<f32>;
 @group(1) @binding(2) var normalTexture: texture_2d<f32>;
@@ -122,16 +126,17 @@ fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> @location
   let direct = (diffuse + specular) * frame.sunColor.rgb * frame.sunColor.a *
                 nDotL * visibility(input.lightClip, nDotL);
 
-  // Low-cost sky/ground fill and approximated environment reflections.
-  // Replace with prefiltered IBL probes for truly photoreal materials.
-  let sky = vec3<f32>(0.24, 0.38, 0.60);
-  let ground = vec3<f32>(0.10, 0.085, 0.07);
-  let irradiance = mix(ground, sky, saturate(N.y * 0.5 + 0.5));
-  let ambientDiffuse = irradiance * base * (1.0 - metallic) * 0.42;
+  // Physically-based image-based lighting, generated from a linear-HDR cubemap.
+  // Diffuse cube stores integral(L * cosTheta); divide by PI for Lambertian BRDF.
+  let irradiance = textureSampleLevel(diffuseIrradiance, environmentSampler, N, 0.0).rgb;
+  let ambientDiffuse = (vec3<f32>(1.0) - fresnelSchlick(nDotV, f0)) *
+                       (1.0 - metallic) * base * irradiance / PI;
   let R = reflect(-V, N);
-  let reflectedSky = mix(ground, sky, saturate(R.y * 0.5 + 0.5));
-  let ambientSpecular = reflectedSky * fresnelSchlick(nDotV, f0) *
-                        (1.0 - 0.8 * roughness) * 0.85;
+  let reflected = textureSampleLevel(specularEnvironment, environmentSampler, R,
+                                    roughness * 5.0).rgb;
+  let brdf = textureSampleLevel(integratedBRDF, environmentSampler,
+                               vec2<f32>(nDotV, roughness), 0.0).rg;
+  let ambientSpecular = reflected * (f0 * brdf.x + vec3<f32>(brdf.y));
   let radiance = direct + (ambientDiffuse + ambientSpecular) * ao;
   return vec4<f32>(radiance, 1.0);
 }
