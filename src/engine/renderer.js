@@ -63,6 +63,17 @@ export class Renderer {
   async initialize() {
     const device = this.device;
     const visibility = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT;
+    // Shadow pass must NOT bind the depth texture it is currently writing.
+    // It has dedicated layouts containing only the uniform buffers used by vsShadow.
+    this.shadowFrameLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }
+    ] });
+    this.shadowObjectLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } }
+    ] });
+    this.shadowFrameGroup = device.createBindGroup({ layout: this.shadowFrameLayout, entries: [
+      { binding: 0, resource: { buffer: this.frameUniform } }
+    ] });
     this.frameLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
@@ -82,6 +93,9 @@ export class Renderer {
     ] });
 
     const layout = device.createPipelineLayout({ bindGroupLayouts: [this.frameLayout, this.objectLayout] });
+    const shadowLayout = device.createPipelineLayout({
+      bindGroupLayouts: [this.shadowFrameLayout, this.shadowObjectLayout]
+    });
     const pbr = await checkedShader(device, 'pbr.wgsl');
     const vertexBuffers = [{
       arrayStride: 32,
@@ -92,7 +106,7 @@ export class Renderer {
       ]
     }];
     this.shadowPipeline = await device.createRenderPipelineAsync({
-      label: 'Shadow depth pass', layout,
+      label: 'Shadow depth pass', layout: shadowLayout,
       vertex: { module: pbr, entryPoint: 'vsShadow', buffers: vertexBuffers },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: {
@@ -162,7 +176,11 @@ export class Renderer {
       { binding: 3, resource: (material.metallicRoughnessTexture ?? this.white).createView() },
       { binding: 4, resource: this.surfaceSampler }
     ] });
-    object._gpu = { uniform, bindGroup };
+    const shadowGroup = device.createBindGroup({
+      layout: this.shadowObjectLayout,
+      entries: [{ binding: 0, resource: { buffer: uniform } }]
+    });
+    object._gpu = { uniform, bindGroup, shadowGroup };
     return object._gpu;
   }
   resize() {
@@ -223,7 +241,7 @@ export class Renderer {
         obj.material.occlusionStrength ?? 1, 0
       ], 36);
       device.queue.writeBuffer(gpu.uniform, 0, data);
-      renderables.push([obj.geometry, gpu.bindGroup]);
+      renderables.push([obj.geometry, gpu.bindGroup, gpu.shadowGroup]);
     }
 
     const encoder = device.createCommandEncoder();
@@ -235,8 +253,8 @@ export class Renderer {
       }
     });
     shadowPass.setPipeline(this.shadowPipeline);
-    shadowPass.setBindGroup(0, this.frameGroup);
-    this.draw(shadowPass, renderables);
+    shadowPass.setBindGroup(0, this.shadowFrameGroup);
+    this.draw(shadowPass, renderables, true);
     shadowPass.end();
 
     const colorPass = encoder.beginRenderPass({
@@ -268,9 +286,9 @@ export class Renderer {
     postPass.end();
     device.queue.submit([encoder.finish()]);
   }
-  draw(pass, renderables) {
-    for (const [geometry, bindGroup] of renderables) {
-      pass.setBindGroup(1, bindGroup);
+  draw(pass, renderables, shadow = false) {
+    for (const [geometry, bindGroup, shadowGroup] of renderables) {
+      pass.setBindGroup(1, shadow ? shadowGroup : bindGroup);
       pass.setVertexBuffer(0, geometry.vertexBuffer);
       pass.setIndexBuffer(geometry.indexBuffer, 'uint32');
       pass.drawIndexed(geometry.indexCount);
