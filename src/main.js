@@ -3,6 +3,7 @@ import { OrbitCamera } from './engine/camera.js';
 import { Scene } from './engine/scene.js';
 import { cube, plane, sphere } from './engine/geometry.js';
 import { fromYaw, clamp } from './engine/math.js';
+import { sunDirectionAtElevation } from './engine/lighting.js';
 import { loadGLB } from './engine/gltf.js';
 
 const canvas = document.querySelector('#viewport');
@@ -10,6 +11,15 @@ const status = document.querySelector('#status');
 const fpsLabel = document.querySelector('#fps');
 const exposure = document.querySelector('#exposure');
 const exposureValue = document.querySelector('#exposure-value');
+const bloom = document.querySelector('#bloom');
+const bloomValue = document.querySelector('#bloom-value');
+const sun = document.querySelector('#sun');
+const sunValue = document.querySelector('#sun-value');
+const applyControls = scene => {
+  scene.exposure = Number(exposure.value);
+  scene.bloomStrength = Number(bloom.value);
+  scene.sunDirection = sunDirectionAtElevation(Number(sun.value));
+};
 
 const setStatus = message => { status.textContent = message; };
 function demoScene(renderer) {
@@ -47,7 +57,7 @@ async function start() {
   let scene = demo.scene;
   let sculpture = demo.sculpture;
   let lastTime = performance.now(), count = 0, accumulator = 0;
-  setStatus('GPU готов · PBR + 2048² тени + HDR/ACES · Перетащите .glb для импорта');
+  setStatus('GPU готов · GGX IBL + HDR sky + bloom + тени · Перетащите .glb для импорта');
 
   renderer.device.lost.then(info => {
     setStatus('GPU-устройство потеряно: ' + info.message + ' · Перезагрузите страницу');
@@ -61,7 +71,7 @@ async function start() {
     camera.yaw = 0.55;
     camera.pitch = 0.35;
     camera.distance = 12;
-    scene.exposure = Number(exposure.value);
+    applyControls(scene);
     setStatus('Демо-сцена восстановлена');
   };
   document.querySelector('#demo').addEventListener('click', resetDemo);
@@ -77,7 +87,7 @@ async function start() {
       const result = await loadGLB(file, renderer, imported);
       scene = imported;
       sculpture = null;
-      scene.exposure = Number(exposure.value);
+      applyControls(scene);
       camera.target = result.center;
       camera.distance = clamp(result.recommendedDistance, 1.5, 80);
       setStatus(file.name + ' · объектов: ' + result.count + ' · PBR');
@@ -99,6 +109,18 @@ async function start() {
   exposure.addEventListener('input', () => {
     exposureValue.textContent = Number(exposure.value).toFixed(2);
     scene.exposure = Number(exposure.value);
+  });
+  bloom.addEventListener('input', () => {
+    bloomValue.textContent = Number(bloom.value).toFixed(2);
+    scene.bloomStrength = Number(bloom.value);
+  });
+  sun.addEventListener('input', () => {
+    sunValue.textContent = sun.value + '°';
+  });
+  // Rebuilding irradiance/specular maps is expensive: update on slider release.
+  sun.addEventListener('change', () => {
+    scene.sunDirection = sunDirectionAtElevation(Number(sun.value));
+    setStatus('HDR-окружение обновлено · высота солнца ' + sun.value + '°');
   });
 
   function frame(time) {

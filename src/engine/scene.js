@@ -7,6 +7,8 @@ export class Scene {
     this.sunColor = [1.0, 0.91, 0.78];
     this.sunIntensity = 5.0;
     this.exposure = 1.0;
+    this.bloomStrength = 0.24;
+    this.bloomThreshold = 1.2;
   }
   add(geometry, material = {}, transform = {}) {
     const object = {

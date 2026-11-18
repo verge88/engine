@@ -1,4 +1,6 @@
 import { lookAt, multiply, normalize, orthographic } from './math.js';
+import { makePostUniform } from './lighting.js';
+import { Environment } from './environment.js';
 import { Scene } from './scene.js';
 
 const shaderURL = name => new URL(name, import.meta.url);
@@ -31,6 +33,7 @@ export class Renderer {
     const format = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format, alphaMode: 'opaque' });
     const renderer = new Renderer(canvas, device, context, format);
+    renderer.environment = await Environment.create(device);
     await renderer.initialize();
     return renderer;
   }
@@ -42,8 +45,10 @@ export class Renderer {
     this.shadowSize = 2048;
     this.hdr = null;
     this.depth = null;
+    this.bloomA = null;
+    this.bloomB = null;
     this.frameUniform = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.exposureUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.exposureUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.surfaceSampler = device.createSampler({
       magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear',
       addressModeU: 'repeat', addressModeV: 'repeat'
@@ -77,7 +82,11 @@ export class Renderer {
     this.frameLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } }
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } },
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
     ] });
     this.objectLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility, buffer: { type: 'uniform' } },
@@ -89,7 +98,11 @@ export class Renderer {
     this.frameGroup = device.createBindGroup({ layout: this.frameLayout, entries: [
       { binding: 0, resource: { buffer: this.frameUniform } },
       { binding: 1, resource: this.shadow.createView() },
-      { binding: 2, resource: this.shadowSampler }
+      { binding: 2, resource: this.shadowSampler },
+      { binding: 3, resource: this.environment.irradiance.createView({ dimension: 'cube' }) },
+      { binding: 4, resource: this.environment.specular.createView({ dimension: 'cube' }) },
+      { binding: 5, resource: this.environment.brdf.createView() },
+      { binding: 6, resource: this.environment.sampler }
     ] });
 
     const layout = device.createPipelineLayout({ bindGroupLayouts: [this.frameLayout, this.objectLayout] });
@@ -126,7 +139,9 @@ export class Renderer {
     this.postLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } }
     ] });
     this.postPipeline = await device.createRenderPipelineAsync({
       label: 'ACES HDR tone mapping',
@@ -135,6 +150,28 @@ export class Renderer {
       fragment: { module: post, entryPoint: 'fsPost', targets: [{ format: this.format }] },
       primitive: { topology: 'triangle-list' }
     });
+
+    const bloom = await checkedShader(device, 'bloom.wgsl');
+    this.bloomLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } }
+    ] });
+    const bloomPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [this.bloomLayout]
+    });
+    const makeBloomPipeline = (entryPoint, label) => device.createRenderPipelineAsync({
+      label, layout: bloomPipelineLayout,
+      vertex: { module: bloom, entryPoint: 'vsFullscreen' },
+      fragment: { module: bloom, entryPoint, targets: [{ format: 'rgba16float' }] },
+      primitive: { topology: 'triangle-list' }
+    });
+    [this.extractPipeline, this.blurHPipeline, this.blurVPipeline] = await Promise.all([
+      makeBloomPipeline('fsExtract', 'HDR bright-pass extraction'),
+      makeBloomPipeline('fsBlurH', 'Gaussian bloom horizontal'),
+      makeBloomPipeline('fsBlurV', 'Gaussian bloom vertical')
+    ]);
   }
   solidTexture(rgba, srgb) {
     const texture = this.device.createTexture({
@@ -193,6 +230,8 @@ export class Renderer {
     this.canvas.height = height;
     this.hdr?.destroy();
     this.depth?.destroy();
+    this.bloomA?.destroy();
+    this.bloomB?.destroy();
     this.hdr = this.device.createTexture({
       label: 'Linear HDR color',
       size: [width, height], format: 'rgba16float',
@@ -201,10 +240,33 @@ export class Renderer {
     this.depth = this.device.createTexture({
       size: [width, height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT
     });
+    const bloomSize = [Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2))];
+    const bloomTexture = label => this.device.createTexture({
+      label, size: bloomSize, format: 'rgba16float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
+    this.bloomA = bloomTexture('Half-resolution bloom A');
+    this.bloomB = bloomTexture('Half-resolution bloom B');
+
+    const sky = this.environment.sky.createView({ dimension: 'cube' });
+    const bloomGroup = texture => this.device.createBindGroup({
+      layout: this.bloomLayout,
+      entries: [
+        { binding: 0, resource: texture.createView() },
+        { binding: 1, resource: this.postSampler },
+        { binding: 2, resource: { buffer: this.exposureUniform } },
+        { binding: 3, resource: sky }
+      ]
+    });
+    this.extractGroup = bloomGroup(this.hdr);
+    this.blurHGroup = bloomGroup(this.bloomA);
+    this.blurVGroup = bloomGroup(this.bloomB);
     this.postGroup = this.device.createBindGroup({ layout: this.postLayout, entries: [
       { binding: 0, resource: this.hdr.createView() },
       { binding: 1, resource: this.postSampler },
-      { binding: 2, resource: { buffer: this.exposureUniform } }
+      { binding: 2, resource: { buffer: this.exposureUniform } },
+      { binding: 3, resource: sky },
+      { binding: 4, resource: this.bloomA.createView() }
     ] });
   }
   render(scene, camera) {
@@ -212,6 +274,7 @@ export class Renderer {
     const device = this.device;
     const { position, viewProjection } = camera.frame(this.canvas.width / this.canvas.height);
     const sun = normalize(scene.sunDirection);
+    this.environment.regenerate(sun);
     const center = camera.target;
     const lightEye = center.map((p, i) => p + 30 * sun[i]);
     const lightProjection = multiply(
@@ -226,7 +289,8 @@ export class Renderer {
     frame.set([...scene.sunColor, scene.sunIntensity], 40);
     frame.set([0, 0, 0, scene.exposure], 44);
     device.queue.writeBuffer(this.frameUniform, 0, frame);
-    device.queue.writeBuffer(this.exposureUniform, 0, new Float32Array([scene.exposure]));
+    device.queue.writeBuffer(this.exposureUniform, 0,
+      makePostUniform(scene, position, camera.target, this.canvas.width / this.canvas.height));
 
     const renderables = [];
     for (const obj of scene.objects) {
@@ -273,6 +337,12 @@ export class Renderer {
     this.draw(colorPass, renderables);
     colorPass.end();
 
+    if (scene.bloomStrength > 0) {
+      this.fullscreenPass(encoder, this.extractPipeline, this.extractGroup, this.bloomA.createView());
+      this.fullscreenPass(encoder, this.blurHPipeline, this.blurHGroup, this.bloomB.createView());
+      this.fullscreenPass(encoder, this.blurVPipeline, this.blurVGroup, this.bloomA.createView());
+    }
+
     const postPass = encoder.beginRenderPass({
       colorAttachments: [{
         view: this.context.getCurrentTexture().createView(),
@@ -285,6 +355,18 @@ export class Renderer {
     postPass.draw(3);
     postPass.end();
     device.queue.submit([encoder.finish()]);
+  }
+  fullscreenPass(encoder, pipeline, group, target) {
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: target, clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        loadOp: 'clear', storeOp: 'store'
+      }]
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, group);
+    pass.draw(3);
+    pass.end();
   }
   draw(pass, renderables, shadow = false) {
     for (const [geometry, bindGroup, shadowGroup] of renderables) {
