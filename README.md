@@ -1,3 +1,105 @@
-# Engine
+# Engine — собственный WebGPU 3D-движок
 
-A new 3D engine project. See development branches and pull requests for implementation.
+Первая рабочая вертикальная сборка независимого **3D-рендерера** на JavaScript и WebGPU. Геометрия, трансформации, управление камерой, загрузчик glTF и WGSL-шейдеры реализованы в этом репозитории **без Three.js, Babylon.js и других игровых движков**.
+
+> **Статус: прототип v0.1, а не готовый фотореалистичный движок.** PBR, HDR и мягкие тени — важные основы реалистичного изображения, но для уровня современных AAA-игр нужны HDR environment maps, отражения, глобальное освещение, постобработка, система ресурсов и намного больше.
+
+## Запуск
+
+Нужен **Node.js 20+** и современный браузер с WebGPU (Chrome/Edge; для других браузеров поддержка зависит от платформы). Для WebGPU требуется защищённый контекст: localhost или HTTPS.
+
+~~~bash
+git clone https://github.com/verge88/engine.git
+cd engine
+npm run dev
+~~~
+
+Откройте **http://localhost:5173**. Зависимости npm не требуются.
+
+- **ЛКМ + движение мыши** — вращение вокруг точки интереса.
+- **Колесо мыши** — приближение/отдаление.
+- **WASD / Space / Shift** — перемещение камеры.
+- **Открыть модель .glb** или drag-and-drop — загрузка статической glTF 2.0-модели с PBR-материалами.
+- **Экспозиция** — управление HDR tone mapping.
+- **Демо-сцена** — возврат к образцам материалов.
+
+## Что реализовано
+
+| Система | Первая реализация |
+| --- | --- |
+| Графический API | WebGPU, WGSL, собственный render loop |
+| Геометрия | Vertex/index GPU buffers, куб, плоскость, UV-сфера |
+| Сцена | Объекты, TRS/матрицы, произвольные масштабы, несколько мешей |
+| Камера | Perspective, orbit/fly-pan, ограничение delta time |
+| Материалы | Metallic-roughness PBR: Cook–Torrance/GGX/Schlick-Smith, baseColor, roughness, metallic |
+| Текстуры | sRGB base color; linear normal и metallic-roughness; normal mapping через производные |
+| Свет | Направленный солнечный свет, приближённая небесная/земная подсветка |
+| Тени | Depth shadow map 2048×2048 с 3×3 PCF |
+| HDR | Linear rgba16float render target, ACES-подобный tone mapping, sRGB вывод |
+| Загрузка | GLB и по URL glTF 2.0, иерархия узлов, interleaved buffers, статические triangle meshes |
+| Инструменты | Локальный HTTP dev server, встроенные Node.js-тесты, GitHub Actions CI |
+
+### Пример API
+
+~~~js
+import { Renderer } from './src/engine/renderer.js';
+import { Scene } from './src/engine/scene.js';
+import { sphere } from './src/engine/geometry.js';
+
+const renderer = await Renderer.create(document.querySelector('canvas'));
+const scene = new Scene();
+scene.add(renderer.geometry(sphere(1)), {
+  baseColor: [0.9, 0.65, 0.25, 1],
+  metallic: 1,
+  roughness: 0.2
+}, { position: [0, 1, 0] });
+// В цикле приложения: renderer.render(scene, camera)
+~~~
+
+## Ограничения первой версии
+
+- **Не фотореализм production-уровня**: отражения не используют реальную environment map; глобальное освещение, ray tracing, TAA, SSR, SSAO и объёмное освещение пока отсутствуют.
+- glTF 2.0: только **статические TRIANGLES**. Нет skinning, morph targets, анимаций, sparse accessors, Draco/Meshopt, KTX2, alpha blending/masking, transmission и иных расширений.
+- Открытие с диска поддерживает **самодостаточные .glb**. Для .gltf с внешними файлами используйте программный loadGLTF(url, renderer, scene) и HTTP-сервер.
+- Текстурные UV-трансформации и режимы семплеров glTF пока не учитываются. Отдельная AO-карта не подключается, если не упакована в R-канал metallic/roughness-текстуры.
+- Тени покрывают фиксированную область около цели камеры; на больших сценах необходимы cascaded shadow maps.
+- Объекты и GPU-ресурсы пока не имеют полного управления временем жизни, ECS и сериализации.
+
+## Тестирование
+
+~~~bash
+npm test
+npm run check
+~~~
+
+Тесты проверяют матрицы, нормали, геометрию, GLB-парсер и декодирование accessor. **Визуальные WebGPU-скриншот-тесты пока не настроены**; для проверки рендеринга необходим совместимый GPU и браузер.
+
+## План развития до фотореализма
+
+1. **Рендеринг:** HDRI/IBL, prefiltered cubemaps + BRDF LUT, sky atmosphere, cascaded shadows, clustered lights.
+2. **Материалы:** glTF material extensions, clearcoat, transmission, anisotropy, нормальные tangent frames/MikkTSpace.
+3. **Освещение:** screen-space AO/reflections, volumetrics, GI (probes/SSGI), позже hardware ray tracing там, где доступно.
+4. **Качество кадра:** TAA/temporal upscaling, bloom, auto-exposure, color grading, anti-aliasing.
+5. **Игровые системы:** ECS, сцены/префабы, анимации/скелеты, физика, звук, ввод, скрипты, редактор.
+6. **Производительность:** frustum/occlusion culling, instancing, LOD, потоковая загрузка, GPU-профилирование.
+
+### Структура
+
+~~~text
+src/
+  engine/
+    math.js        — 3D-математика
+    camera.js      — камера и управление
+    geometry.js    — генераторы мешей
+    scene.js       — сцена и объекты
+    gltf.js        — GLB/glTF 2.0 загрузчик
+    renderer.js    — WebGPU рендер-проходы и ресурсы
+    pbr.wgsl       — PBR + shadow map
+    post.wgsl      — HDR + tonemapping
+  main.js          — демо-приложение
+  style.css        — интерфейс
+scripts/serve.mjs  — локальный статический сервер
+tests/             — Node.js-тесты
+~~~
+
+Реализация рассчитана на постепенное расширение, а не на подмену готового графического движка готовой библиотекой.
