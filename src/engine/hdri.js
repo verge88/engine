@@ -103,7 +103,9 @@ export function floatToHalfPositive(value) {
   if (exponent < -14) return Math.round(value * 16777216);
   const e = exponent + 15;
   const fraction = Math.round((value / Math.pow(2, exponent) - 1) * 1024);
-  return fraction === 1024 ? (e + 1) << 10 : (e << 10) | fraction;
+  const encoded = fraction === 1024 ? (e + 1) << 10 : (e << 10) | fraction;
+  // Round-to-nearest must never turn a finite HDR radiance into +Infinity.
+  return Math.min(encoded, 0x7bff);
 }
 export function packRGBA16F({ width, height, pixels }) {
   if (!Number.isInteger(width) || !Number.isInteger(height) ||
