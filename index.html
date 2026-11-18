@@ -9,11 +9,13 @@
 <body>
   <canvas id="viewport" aria-label="3D viewport"></canvas>
   <header class="toolbar">
-    <div class="brand"><span class="logo">◈</span><div><strong>ENGINE</strong><small>WebGPU · Render Lab 0.1</small></div></div>
+    <div class="brand"><span class="logo">◈</span><div><strong>ENGINE</strong><small>WebGPU · Render Lab 0.2 · IBL</small></div></div>
     <div class="tools">
       <button id="demo" type="button">Демо-сцена</button>
       <label class="file-button">Открыть модель .glb<input id="model" type="file" accept=".glb,model/gltf-binary"></label>
       <label class="exposure">Экспозиция <input id="exposure" type="range" min="0.25" max="2.5" step="0.05" value="1"><output id="exposure-value">1.00</output></label>
+      <label class="exposure">Bloom <input id="bloom" type="range" min="0" max="1.5" step="0.05" value="0.25"><output id="bloom-value">0.25</output></label>
+      <label class="exposure">Солнце <input id="sun" type="range" min="5" max="80" step="1" value="56"><output id="sun-value">56°</output></label>
     </div>
   </header>
   <aside class="hint">
