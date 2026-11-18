@@ -1,4 +1,5 @@
-import { cross, lookAt, multiply, normalize, orthographic } from './math.js';
+import { lookAt, multiply, normalize, orthographic } from './math.js';
+import { makePostUniform } from './lighting.js';
 import { Environment } from './environment.js';
 import { Scene } from './scene.js';
 
@@ -288,14 +289,8 @@ export class Renderer {
     frame.set([...scene.sunColor, scene.sunIntensity], 40);
     frame.set([0, 0, 0, scene.exposure], 44);
     device.queue.writeBuffer(this.frameUniform, 0, frame);
-    const forward = normalize(camera.target.map((v, i) => v - position[i]));
-    const right = normalize(cross(forward, [0, 1, 0]));
-    const up = cross(right, forward);
-    device.queue.writeBuffer(this.exposureUniform, 0, new Float32Array([
-      scene.exposure, scene.bloomStrength, scene.bloomThreshold,
-      this.canvas.width / this.canvas.height,
-      ...right, 0, ...up, 0, ...forward, 0
-    ]));
+    device.queue.writeBuffer(this.exposureUniform, 0,
+      makePostUniform(scene, position, camera.target, this.canvas.width / this.canvas.height));
 
     const renderables = [];
     for (const obj of scene.objects) {
