@@ -1,4 +1,4 @@
-import { clamp, lookAt, perspective } from './math.js';
+import { clamp, lookAt, multiply, perspective } from './math.js';
 
 export class OrbitCamera {
   constructor(canvas) {
@@ -50,19 +50,10 @@ export class OrbitCamera {
     ];
     return {
       position: eye,
-      viewProjection: (() => {
-        // Multiplication is imported here to keep the camera independent of the renderer.
-        return this.projection(aspect, eye);
-      })()
+      viewProjection: multiply(
+        perspective(Math.PI / 3, aspect, 0.05, 150),
+        lookAt(eye, this.target)
+      )
     };
-  }
-  projection(aspect, eye) {
-    return this._multiply(perspective(Math.PI / 3, aspect, 0.05, 150), lookAt(eye, this.target));
-  }
-  _multiply(a, b) {
-    const out = new Float32Array(16);
-    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) for (let k = 0; k < 4; k++)
-      out[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
-    return out;
   }
 }
