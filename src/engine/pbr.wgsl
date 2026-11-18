@@ -2,11 +2,13 @@ const PI: f32 = 3.14159265359;
 
 struct Frame {
   viewProjection: mat4x4<f32>,
-  lightProjection: mat4x4<f32>,
+  lightProjections: array<mat4x4<f32>, 3>,
   cameraPosition: vec4<f32>,
+  cameraForward: vec4<f32>,
   sunDirection: vec4<f32>,
   sunColor: vec4<f32>,
   ambient: vec4<f32>,
+  shadowSplits: vec4<f32>,
 };
 struct Object {
   model: mat4x4<f32>,
@@ -15,7 +17,7 @@ struct Object {
   material: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> frame: Frame;
-@group(0) @binding(1) var shadowMap: texture_depth_2d;
+@group(0) @binding(1) var shadowMap: texture_depth_2d_array;
 @group(0) @binding(2) var shadowSampler: sampler_comparison;
 @group(0) @binding(3) var diffuseIrradiance: texture_cube<f32>;
 @group(0) @binding(4) var specularEnvironment: texture_cube<f32>;
@@ -37,7 +39,7 @@ struct VertexOut {
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
-  @location(3) lightClip: vec4<f32>,
+  // Shadow UV is chosen per fragment from camera depth and cascade matrix.
 };
 @vertex
 fn vsMain(input: VertexIn) -> VertexOut {
@@ -47,12 +49,7 @@ fn vsMain(input: VertexIn) -> VertexOut {
   out.normal = normalize((object.normalMatrix * vec4<f32>(input.normal, 0.0)).xyz);
   out.uv = input.uv;
   out.clipPosition = frame.viewProjection * world;
-  out.lightClip = frame.lightProjection * world;
   return out;
-}
-@vertex
-fn vsShadow(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-  return frame.lightProjection * object.model * vec4<f32>(position, 1.0);
 }
 fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
 fn fresnelSchlick(cosTheta: f32, f0: vec3<f32>) -> vec3<f32> {
@@ -69,7 +66,15 @@ fn geometrySchlickGGX(nDotV: f32, roughness: f32) -> f32 {
   let k = r * r / 8.0;
   return nDotV / max(nDotV * (1.0 - k) + k, 0.00001);
 }
-fn visibility(lightClip: vec4<f32>, nDotL: f32) -> f32 {
+fn visibility(worldPos: vec3<f32>, nDotL: f32) -> f32 {
+  let viewDepth = dot(worldPos - frame.cameraPosition.xyz, frame.cameraForward.xyz);
+  if (viewDepth <= 0.0 || viewDepth > frame.shadowSplits.z) {
+    return 1.0;
+  }
+  var layer: i32 = 0;
+  if (viewDepth > frame.shadowSplits.x) { layer = 1; }
+  if (viewDepth > frame.shadowSplits.y) { layer = 2; }
+  let lightClip = frame.lightProjections[u32(layer)] * vec4<f32>(worldPos, 1.0);
   let ndc = lightClip.xyz / lightClip.w;
   let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
   if (ndc.z <= 0.0 || ndc.z >= 1.0 ||
@@ -82,7 +87,7 @@ fn visibility(lightClip: vec4<f32>, nDotL: f32) -> f32 {
   for (var y: i32 = -1; y <= 1; y = y + 1) {
     for (var x: i32 = -1; x <= 1; x = x + 1) {
       total += textureSampleCompareLevel(shadowMap, shadowSampler,
-        uv + vec2<f32>(f32(x), f32(y)) * texel, ndc.z - bias);
+        uv + vec2<f32>(f32(x), f32(y)) * texel, layer, ndc.z - bias);
     }
   }
   return total / 9.0;
@@ -124,7 +129,7 @@ fn fsMain(input: VertexOut, @builtin(front_facing) frontFace: bool) -> @location
   let specular = D * G * F / max(4.0 * nDotV * nDotL, 0.0001);
   let diffuse = (vec3<f32>(1.0) - F) * (1.0 - metallic) * base / PI;
   let direct = (diffuse + specular) * frame.sunColor.rgb * frame.sunColor.a *
-                nDotL * visibility(input.lightClip, nDotL);
+                nDotL * visibility(input.position, nDotL);
 
   // Physically-based image-based lighting, generated from a linear-HDR cubemap.
   // Diffuse cube stores integral(L * cosTheta); divide by PI for Lambertian BRDF.
