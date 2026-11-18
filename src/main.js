@@ -15,10 +15,16 @@ const bloom = document.querySelector('#bloom');
 const bloomValue = document.querySelector('#bloom-value');
 const sun = document.querySelector('#sun');
 const sunValue = document.querySelector('#sun-value');
+const ao = document.querySelector('#ao');
+const gi = document.querySelector('#gi');
+const ssr = document.querySelector('#ssr');
 const applyControls = scene => {
   scene.exposure = Number(exposure.value);
   scene.bloomStrength = Number(bloom.value);
   scene.sunDirection = sunDirectionAtElevation(Number(sun.value));
+  scene.aoStrength = Number(ao.value);
+  scene.giStrength = Number(gi.value);
+  scene.ssrStrength = Number(ssr.value);
 };
 
 const setStatus = message => { status.textContent = message; };
@@ -47,7 +53,18 @@ function demoScene(renderer) {
   const sculpture = scene.add(block, {
     baseColor: [0.52, 0.79, 0.84, 1], metallic: 0.86, roughness: 0.2
   }, { position: [0, 2.7, -3.8], scale: [0.8, 0.8, 0.8] });
-  return { scene, sculpture };
+  const lamps = [
+    scene.addPointLight({
+      position: [-4.2, 3.0, 2.0], color: [1.0, 0.20, 0.09], intensity: 52, range: 9
+    }),
+    scene.addPointLight({
+      position: [3.8, 2.5, 1.5], color: [0.08, 0.42, 1.0], intensity: 60, range: 9
+    }),
+    scene.addPointLight({
+      position: [0.0, 3.5, -4.1], color: [0.27, 1.0, 0.48], intensity: 35, range: 6
+    })
+  ];
+  return { scene, sculpture, lamps };
 }
 
 async function start() {
@@ -56,8 +73,9 @@ async function start() {
   let demo = demoScene(renderer);
   let scene = demo.scene;
   let sculpture = demo.sculpture;
+  let lamps = demo.lamps;
   let lastTime = performance.now(), count = 0, accumulator = 0;
-  setStatus('GPU готов · HDRI/IBL + 3 каскада теней + bloom · Перетащите .glb или .hdr');
+  setStatus('GPU готов · 16 point lights + SSR + AO/GI · HDRI/CSM сохранены');
 
   renderer.device.lost.then(info => {
     setStatus('GPU-устройство потеряно: ' + info.message + ' · Перезагрузите страницу');
@@ -67,6 +85,7 @@ async function start() {
     demo = demoScene(renderer);
     scene = demo.scene;
     sculpture = demo.sculpture;
+    lamps = demo.lamps;
     camera.target = [0, 0.8, 0];
     camera.yaw = 0.55;
     camera.pitch = 0.35;
@@ -87,6 +106,7 @@ async function start() {
       const result = await loadGLB(file, renderer, imported);
       scene = imported;
       sculpture = null;
+      lamps = [];
       applyControls(scene);
       camera.target = result.center;
       camera.distance = clamp(result.recommendedDistance, 1.5, 80);
@@ -144,6 +164,17 @@ async function start() {
     bloomValue.textContent = Number(bloom.value).toFixed(2);
     scene.bloomStrength = Number(bloom.value);
   });
+  for (const [control, prop] of [
+    [ao, 'aoStrength'],
+    [gi, 'giStrength'],
+    [ssr, 'ssrStrength']
+  ]) {
+    const output = document.querySelector('#' + control.id + '-value');
+    control.addEventListener('input', () => {
+      scene[prop] = Number(control.value);
+      output.textContent = Number(control.value).toFixed(2);
+    });
+  }
   sun.addEventListener('input', () => {
     sunValue.textContent = sun.value + '°';
   });
@@ -161,6 +192,12 @@ async function start() {
     try {
       camera.update(dt);
       if (sculpture) sculpture.rotation = fromYaw(time * 0.00035);
+      if (lamps.length) {
+        const t = time * 0.0006;
+        lamps[0].position[0] = -4.2 + Math.sin(t) * 0.6;
+        lamps[1].position[2] = 1.5 + Math.cos(t * 0.75) * 0.9;
+        lamps[2].position[1] = 3.5 + Math.sin(t * 0.8) * 0.4;
+      }
       renderer.render(scene, camera);
     } catch (error) {
       console.error(error);

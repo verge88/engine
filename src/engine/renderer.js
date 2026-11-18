@@ -1,7 +1,8 @@
 import { normalize } from './math.js';
 import { buildCascades, CASCADE_COUNT, CASCADE_SHADOW_SIZE } from './cascades.js';
 import { cameraBasis } from './lighting.js';
-import { makePostUniform } from './lighting.js';
+import { makeScreenUniform } from './lighting.js';
+import { packPointLights, POINT_LIGHT_BYTES } from './point-lights.js';
 import { Environment } from './environment.js';
 import { Scene } from './scene.js';
 
@@ -50,8 +51,16 @@ export class Renderer {
     this.depth = null;
     this.bloomA = null;
     this.bloomB = null;
+    this.normalDepth = null;
+    this.indirect = null;
+    this.reflections = null;
+    this.pointLightBuffer = device.createBuffer({
+      label: 'Dynamic PBR point lights (16)',
+      size: POINT_LIGHT_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
     this.frameUniform = device.createBuffer({ size: 352, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.exposureUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.exposureUniform = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.surfaceSampler = device.createSampler({
       magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear',
       addressModeU: 'repeat', addressModeV: 'repeat'
@@ -95,7 +104,9 @@ export class Renderer {
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
       { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
       { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } },
-      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 7, visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: 'read-only-storage' } }
     ] });
     this.objectLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility, buffer: { type: 'uniform' } },
@@ -111,7 +122,8 @@ export class Renderer {
       { binding: 3, resource: this.environment.irradiance.createView({ dimension: 'cube' }) },
       { binding: 4, resource: this.environment.specular.createView({ dimension: 'cube' }) },
       { binding: 5, resource: this.environment.brdf.createView() },
-      { binding: 6, resource: this.environment.sampler }
+      { binding: 6, resource: this.environment.sampler },
+      { binding: 7, resource: { buffer: this.pointLightBuffer } }
     ] });
 
     const layout = device.createPipelineLayout({ bindGroupLayouts: [this.frameLayout, this.objectLayout] });
@@ -141,7 +153,10 @@ export class Renderer {
     this.mainPipeline = await device.createRenderPipelineAsync({
       label: 'Metallic-roughness PBR pass', layout,
       vertex: { module: pbr, entryPoint: 'vsMain', buffers: vertexBuffers },
-      fragment: { module: pbr, entryPoint: 'fsMain', targets: [{ format: 'rgba16float' }] },
+      fragment: { module: pbr, entryPoint: 'fsMain', targets: [
+        { format: 'rgba16float' },
+        { format: 'rgba16float' }
+      ] },
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
     });
@@ -152,7 +167,9 @@ export class Renderer {
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: 'cube' } },
-      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } }
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } },
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d' } }
     ] });
     this.postPipeline = await device.createRenderPipelineAsync({
       label: 'ACES HDR tone mapping',
@@ -182,6 +199,25 @@ export class Renderer {
       makeBloomPipeline('fsExtract', 'HDR bright-pass extraction'),
       makeBloomPipeline('fsBlurH', 'Gaussian bloom horizontal'),
       makeBloomPipeline('fsBlurV', 'Gaussian bloom vertical')
+    ]);
+
+    const screen = await checkedShader(device, 'screen-space.wgsl');
+    this.screenLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
+    ] });
+    const screenLayout = device.createPipelineLayout({ bindGroupLayouts: [this.screenLayout] });
+    const createScreenPipeline = (name, label) => device.createRenderPipelineAsync({
+      label, layout: screenLayout,
+      vertex: { module: screen, entryPoint: 'vsFull' },
+      fragment: { module: screen, entryPoint: name, targets: [{ format: 'rgba16float' }] },
+      primitive: { topology: 'triangle-list' }
+    });
+    [this.indirectPipeline, this.reflectionPipeline] = await Promise.all([
+      createScreenPipeline('fsIndirect', 'Half-res screen-space bounce and occlusion'),
+      createScreenPipeline('fsReflection', 'Half-res screen-space reflections')
     ]);
   }
   solidTexture(rgba, srgb) {
@@ -243,6 +279,9 @@ export class Renderer {
     this.depth?.destroy();
     this.bloomA?.destroy();
     this.bloomB?.destroy();
+    this.normalDepth?.destroy();
+    this.indirect?.destroy();
+    this.reflections?.destroy();
     this.hdr = this.device.createTexture({
       label: 'Linear HDR color',
       size: [width, height], format: 'rgba16float',
@@ -251,6 +290,11 @@ export class Renderer {
     this.depth = this.device.createTexture({
       size: [width, height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT
     });
+    this.normalDepth = this.device.createTexture({
+      label: 'World normal and view depth G-buffer',
+      size: [width, height], format: 'rgba16float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
     const bloomSize = [Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2))];
     const bloomTexture = label => this.device.createTexture({
       label, size: bloomSize, format: 'rgba16float',
@@ -258,6 +302,18 @@ export class Renderer {
     });
     this.bloomA = bloomTexture('Half-resolution bloom A');
     this.bloomB = bloomTexture('Half-resolution bloom B');
+    this.indirect = bloomTexture('Half-res indirect light and occlusion');
+    this.reflections = bloomTexture('Half-res screen-space reflections');
+
+    this.screenGroup = this.device.createBindGroup({
+      layout: this.screenLayout,
+      entries: [
+        { binding: 0, resource: this.hdr.createView() },
+        { binding: 1, resource: this.normalDepth.createView() },
+        { binding: 2, resource: this.postSampler },
+        { binding: 3, resource: { buffer: this.exposureUniform } }
+      ]
+    });
 
     const sky = this.environment.sky.createView({ dimension: 'cube' });
     const bloomGroup = texture => this.device.createBindGroup({
@@ -277,7 +333,9 @@ export class Renderer {
       { binding: 1, resource: this.postSampler },
       { binding: 2, resource: { buffer: this.exposureUniform } },
       { binding: 3, resource: sky },
-      { binding: 4, resource: this.bloomA.createView() }
+      { binding: 4, resource: this.bloomA.createView() },
+      { binding: 5, resource: this.indirect.createView() },
+      { binding: 6, resource: this.reflections.createView() }
     ] });
   }
   render(scene, camera) {
@@ -307,7 +365,8 @@ export class Renderer {
     frame.set([...cascades.splits, 0], 84);
     device.queue.writeBuffer(this.frameUniform, 0, frame);
     device.queue.writeBuffer(this.exposureUniform, 0,
-      makePostUniform(scene, position, camera.target, this.canvas.width / this.canvas.height));
+      makeScreenUniform(scene, position, camera.target, this.canvas.width / this.canvas.height));
+    device.queue.writeBuffer(this.pointLightBuffer, 0, packPointLights(scene.pointLights));
 
     const renderables = [];
     for (const obj of scene.objects) {
@@ -348,6 +407,10 @@ export class Renderer {
         view: this.hdr.createView(),
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
         loadOp: 'clear', storeOp: 'store'
+      }, {
+        view: this.normalDepth.createView(),
+        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        loadOp: 'clear', storeOp: 'store'
       }],
       depthStencilAttachment: {
         view: this.depth.createView(), depthClearValue: 1,
@@ -358,6 +421,11 @@ export class Renderer {
     colorPass.setBindGroup(0, this.frameGroup);
     this.draw(colorPass, renderables);
     colorPass.end();
+
+    this.fullscreenPass(encoder, this.indirectPipeline, this.screenGroup,
+      this.indirect.createView(), scene.aoStrength > 0 || scene.giStrength > 0);
+    this.fullscreenPass(encoder, this.reflectionPipeline, this.screenGroup,
+      this.reflections.createView(), scene.ssrStrength > 0);
 
     if (scene.bloomStrength > 0) {
       this.fullscreenPass(encoder, this.extractPipeline, this.extractGroup, this.bloomA.createView());
@@ -378,16 +446,18 @@ export class Renderer {
     postPass.end();
     device.queue.submit([encoder.finish()]);
   }
-  fullscreenPass(encoder, pipeline, group, target) {
+  fullscreenPass(encoder, pipeline, group, target, enabled = true) {
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
         view: target, clearValue: { r: 0, g: 0, b: 0, a: 1 },
         loadOp: 'clear', storeOp: 'store'
       }]
     });
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group);
-    pass.draw(3);
+    if (enabled) {
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, group);
+      pass.draw(3);
+    }
     pass.end();
   }
   draw(pass, renderables, shadow = false) {
