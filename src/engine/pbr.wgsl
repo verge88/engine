@@ -77,7 +77,7 @@ fn visibility(lightClip: vec4<f32>, nDotL: f32) -> f32 {
   var total = 0.0;
   for (var y: i32 = -1; y <= 1; y = y + 1) {
     for (var x: i32 = -1; x <= 1; x = x + 1) {
-      total += textureSampleCompare(shadowMap, shadowSampler,
+      total += textureSampleCompareLevel(shadowMap, shadowSampler,
         uv + vec2<f32>(f32(x), f32(y)) * texel, ndc.z - bias);
     }
   }
