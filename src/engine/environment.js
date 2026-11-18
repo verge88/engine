@@ -1,4 +1,5 @@
 import { normalize } from './math.js';
+import { decodeRadiance, packRGBA16F } from './hdri.js';
 
 export const ENV_SIZE = 256;
 export const IRRADIANCE_SIZE = 32;
@@ -58,17 +59,29 @@ export class Environment {
       size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     this.directionKey = '';
+    this.mode = 'procedural';
+    this.hdriTexture = null;
+    this.hdriGroup = null;
+    this.hdriSampler = device.createSampler({
+      magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'repeat', addressModeV: 'clamp-to-edge'
+    });
   }
   async initialize() {
     const d = this.device;
-    const [skyShader, prefilterShader, brdfShader] = await Promise.all([
+    const [skyShader, prefilterShader, brdfShader, equirectShader] = await Promise.all([
       moduleFromURL(d, 'sky.wgsl'),
       moduleFromURL(d, 'prefilter.wgsl'),
-      moduleFromURL(d, 'brdf.wgsl')
+      moduleFromURL(d, 'brdf.wgsl'),
+      moduleFromURL(d, 'equirect.wgsl')
     ]);
     this.skyPipeline = await d.createComputePipelineAsync({
       label: 'Procedural HDR sky cubemap',
       layout: 'auto', compute: { module: skyShader, entryPoint: 'csSky' }
+    });
+    this.equirectPipeline = await d.createComputePipelineAsync({
+      label: 'Radiance HDRI equirectangular conversion',
+      layout: 'auto', compute: { module: equirectShader, entryPoint: 'csEquirect' }
     });
     this.irradiancePipeline = await d.createComputePipelineAsync({
       label: 'Cosine-weighted diffuse irradiance',
@@ -134,6 +147,7 @@ export class Environment {
     d.queue.submit([encoder.finish()]);
   }
   regenerate(sun) {
+    if (this.mode === 'hdri') return false;
     const normalized = normalize(sun);
     if (normalized.length !== 3 || !normalized.every(Number.isFinite) ||
         Math.hypot(...normalized) < 0.5) {
@@ -144,7 +158,57 @@ export class Environment {
     this.directionKey = key;
     this.device.queue.writeBuffer(this.skyUniform, 0,
       new Float32Array([...normalized, 0, 1, 1, 1, 1]));
-
+    this.rebuild();
+    return true;
+  }
+  async loadHDRI(file) {
+    const image = decodeRadiance(await file.arrayBuffer());
+    return this.setHDRI(image);
+  }
+  setHDRI(image) {
+    const { width, height } = image;
+    if (width > this.device.limits.maxTextureDimension2D ||
+        height > this.device.limits.maxTextureDimension2D)
+      throw new Error('HDRI dimensions exceed GPU texture limits');
+    const { bytesPerRow, data } = packRGBA16F(image);
+    const texture = this.device.createTexture({
+      label: 'Radiance HDRI equirectangular source',
+      size: [width, height], format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
+    try {
+      this.device.queue.writeTexture({ texture }, data,
+        { bytesPerRow, rowsPerImage: height }, [width, height]);
+      const group = this.device.createBindGroup({
+        layout: this.equirectPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: texture.createView() },
+          { binding: 1, resource: this.hdriSampler },
+          { binding: 2, resource: storageCubeView(this.sky) }
+        ]
+      });
+      const previous = this.hdriTexture;
+      this.hdriTexture = texture;
+      this.hdriGroup = group;
+      this.mode = 'hdri';
+      this.rebuild();
+      previous?.destroy();
+      return { width, height };
+    } catch (error) {
+      if (this.hdriTexture !== texture) texture.destroy();
+      throw error;
+    }
+  }
+  useProcedural(sun) {
+    if (this.mode === 'procedural') return;
+    this.mode = 'procedural';
+    this.hdriTexture?.destroy();
+    this.hdriTexture = null;
+    this.hdriGroup = null;
+    this.directionKey = '';
+    this.regenerate(sun);
+  }
+  rebuild() {
     const encoder = this.device.createCommandEncoder({ label: 'Rebuild HDR image-based lighting' });
     const dispatch = (pipeline, group, size) => {
       const pass = encoder.beginComputePass();
@@ -153,14 +217,18 @@ export class Environment {
       pass.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8), 6);
       pass.end();
     };
-    dispatch(this.skyPipeline, this.skyGroup, ENV_SIZE);
+    if (this.mode === 'hdri') {
+      dispatch(this.equirectPipeline, this.hdriGroup, ENV_SIZE);
+    } else {
+      dispatch(this.skyPipeline, this.skyGroup, ENV_SIZE);
+    }
     dispatch(this.irradiancePipeline, this.irradianceJob.group, IRRADIANCE_SIZE);
     for (const job of this.specularJobs) dispatch(this.specularPipeline, job.group, job.size);
     this.device.queue.submit([encoder.finish()]);
-    return true;
   }
   destroy() {
     this.sky.destroy();
+    this.hdriTexture?.destroy();
     this.irradiance.destroy();
     this.specular.destroy();
     this.brdf.destroy();
